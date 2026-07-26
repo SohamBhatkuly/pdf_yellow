@@ -87,6 +87,21 @@ def recolor_vector_page(page):
 
     page.parent.update_stream(xref, text_stream.encode("latin1"))
 
+def diagnose_stream(page):
+    from collections import Counter
+    page.clean_contents()
+    content_list = page.get_contents()
+    if not content_list:
+        return Counter()
+    xref = content_list[0]
+    stream_bytes = page.parent.xref_stream(xref)
+    if not stream_bytes:
+        return Counter()
+    text = stream_bytes.decode("latin1", errors="ignore")
+    ops = re.findall(r'(?<=\s)([A-Za-z]{1,3})(?=\s|\n)', text)
+    return Counter(op for op in ops if op in
+        ['RG', 'rg', 'G', 'g', 'K', 'k', 'SC', 'SCN', 'sc', 'scn', 'CS', 'cs'])
+
 if uploaded_file is not None:
     doc = fitz.open(stream=uploaded_file.read(), filetype="pdf")
     total_pages = len(doc)
@@ -125,6 +140,17 @@ if uploaded_file is not None:
     col1, col2 = st.columns(2)
 
     preview_page = doc[preview_idx]
+    preview_page = doc[preview_idx]
+
+    # --- ADD THIS ---
+    if engine_mode == "Vector (Native PDF Shapes)":
+        op_counts = diagnose_stream(preview_page)
+        st.sidebar.subheader("🔍 Stream Diagnostics")
+        st.sidebar.write(dict(op_counts) if op_counts else "No color operators found")
+    # --- END ADD ---
+
+    pix_orig = preview_page.get_pixmap(dpi=150)
+    ...
     pix_orig = preview_page.get_pixmap(dpi=150)
     orig_img = Image.frombytes("RGB", [pix_orig.width, pix_orig.height], pix_orig.samples)
     col1.image(orig_img, caption=f"Original (Page {preview_page_num})", use_container_width=True)
