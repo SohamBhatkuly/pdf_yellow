@@ -6,76 +6,138 @@ import streamlit as st
 st.set_page_config(page_title="PDF Line Recolorer", layout="wide")
 st.title("🟡 Advanced PDF Line Recolorer")
 
-# Sidebar Controls
+# --- SIDEBAR CONTROLS ---
 st.sidebar.header("Processing Controls")
+
+# Processing Mode Selection
+engine_mode = st.sidebar.radio(
+    "Recoloring Engine",
+    options=["Raster (Image-Based)", "Vector (Native PDF Shapes)"],
+    help="Choose Raster for scans and flattened drawings. Choose Vector for CAD exports and digital PDFs to keep text searchable and file sizes small."
+)
+
 target_hex = st.sidebar.color_picker("Line Color", "#FFF200")
-bg_hex = st.sidebar.color_picker("Background Color", "#FFFFFF")
-threshold = st.sidebar.slider("Line Sensitivity", min_value=150, max_value=255, value=240, help="Lower = thinner lines, Higher = thicker/fainter lines")
-dpi_setting = st.sidebar.select_slider("Export DPI", options=[150, 300, 450], value=300)
+bg_hex = st.sidebar.color_picker("Background Color (Raster Only)", "#FFFFFF")
+
+if engine_mode == "Raster (Image-Based)":
+    threshold = st.sidebar.slider("Line Sensitivity", min_value=150, max_value=255, value=240, help="Lower = thinner lines, Higher = thicker/fainter lines")
+    dpi_setting = st.sidebar.select_slider("Export DPI", options=[150, 300, 450], value=300)
 
 # Helper functions for hex conversion
 def hex_to_rgb(hex_str):
     h = hex_str.lstrip('#')
     return np.array([int(h[i:i+2], 16) for i in (0, 2, 4)], dtype=np.uint8)
 
+def hex_to_float_rgb(hex_str):
+    h = hex_str.lstrip('#')
+    return tuple(int(h[i:i+2], 16) / 255.0 for i in (0, 2, 4))
+
 LINE_COLOR = hex_to_rgb(target_hex)
 BG_COLOR = hex_to_rgb(bg_hex)
+FLOAT_LINE_COLOR = hex_to_float_rgb(target_hex)
+
+# --- ENGINE EXPLANATION BANNER ---
+if engine_mode == "Vector (Native PDF Shapes)":
+    st.info(
+        "💡 **Vector Mode Active:** Ideal for digital CAD exports (AutoCAD, Revit) and native PDF vector files. "
+        "It preserves 100% vector sharpness, keeps text searchable, and results in tiny file sizes. "
+        "*Note: It will not recolor scanned paper documents.*"
+    )
+else:
+    st.info(
+        "💡 **Raster Mode Active:** Ideal for scanned paper drawings, images, or flattened PDFs. "
+        "It processes every pixel directly to guarantee all drawing lines turn yellow."
+    )
 
 uploaded_file = st.file_uploader("Upload your PDF file", type=["pdf"])
 
 if uploaded_file is not None:
     doc = fitz.open(stream=uploaded_file.read(), filetype="pdf")
+    total_pages = len(doc)
     
-    # Render Preview of Page 1
-    st.subheader("Preview (Page 1)")
-    col1, col2 = st.columns(2)
+    st.write(f"📄 **Total Pages in Document:** {total_pages}")
     
-    # Generate Page 1 Image
-    first_page = doc[0]
-    pix = first_page.get_pixmap(dpi=150)
-    orig_img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+    # --- PAGE SELECTION FEATURE ---
+    st.subheader("Select Pages to Process")
+    page_option = st.radio("Page Processing Scope:", ["All Pages", "Specific Pages / Range"])
     
-    # Process Preview
-    img_np = np.array(orig_img)
-    gray_np = np.array(orig_img.convert("L"))
-    drawing_mask = gray_np < threshold
+    selected_indices = list(range(total_pages))  # Default: all pages
     
-    preview_np = np.full_like(img_np, BG_COLOR)
-    preview_np[drawing_mask] = LINE_COLOR
-    preview_img = Image.fromarray(preview_np)
+    if page_option == "Specific Pages / Range":
+        page_input = st.text_input(
+            "Enter page numbers or ranges (e.g., '1, 3, 5-8'):",
+            value=f"1-{min(5, total_pages)}"
+        )
+        parsed_indices = set()
+        try:
+            parts = [p.strip() for p in page_input.split(",") if p.strip()]
+            for part in parts:
+                if "-" in part:
+                    start, end = part.split("-")
+                    parsed_indices.update(range(int(start) - 1, int(end)))
+                else:
+                    parsed_indices.add(int(part) - 1)
+            # Filter valid page ranges
+            selected_indices = sorted([i for i in parsed_indices if 0 <= i < total_pages])
+            st.success(f"Selected {len(selected_indices)} page(s): {[idx + 1 for idx in selected_indices]}")
+        except Exception:
+            st.error("Invalid page format. Please enter numbers like '1, 3-5'. Processing all pages by default.")
 
-    col1.image(orig_img, caption="Original Page 1", use_container_width=True)
-    col2.image(preview_img, caption="Recolored Preview", use_container_width=True)
-
-    # Full Processing Button
-    if st.button("Process & Download Full PDF"):
-        with st.spinner("Processing all pages..."):
-            processed_images = []
-            for page in doc:
-                pix = page.get_pixmap(dpi=dpi_setting)
-                img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+    # --- PROCESS & DOWNLOAD ---
+    if st.button("Process & Download PDF"):
+        with st.spinner("Processing selected pages..."):
+            
+            # --- ENGINE 1: VECTOR PROCESSING ---
+            if engine_mode == "Vector (Native PDF Shapes)":
+                output_doc = fitz.open()
                 
-                img_np = np.array(img)
-                gray_np = np.array(img.convert("L"))
-                drawing_mask = gray_np < threshold
+                for idx in selected_indices:
+                    page = doc[idx]
+                    
+                    # Create a drawing layer update
+                    shape_list = page.get_drawings()
+                    for shape in shape_list:
+                        # Override line stroke and fill colors to target RGB
+                        if "color" in shape and shape["color"] is not None:
+                            shape["color"] = FLOAT_LINE_COLOR
+                        if "fill" in shape and shape["fill"] is not None:
+                            shape["fill"] = FLOAT_LINE_COLOR
+                    
+                    output_doc.insert_pdf(doc, from_page=idx, to_page=idx)
                 
-                recolored_np = np.full_like(img_np, BG_COLOR)
-                recolored_np[drawing_mask] = LINE_COLOR
+                output_pdf_bytes = output_doc.write()
                 
-                processed_images.append(Image.fromarray(recolored_np))
+            # --- ENGINE 2: RASTER PROCESSING ---
+            else:
+                processed_images = []
+                for idx in selected_indices:
+                    page = doc[idx]
+                    pix = page.get_pixmap(dpi=dpi_setting)
+                    img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+                    
+                    img_np = np.array(img)
+                    gray_np = np.array(img.convert("L"))
+                    drawing_mask = gray_np < threshold
+                    
+                    recolored_np = np.full_like(img_np, BG_COLOR)
+                    recolored_np[drawing_mask] = LINE_COLOR
+                    
+                    processed_images.append(Image.fromarray(recolored_np))
 
-            output_pdf_path = "recolored_output.pdf"
-            processed_images[0].save(
-                output_pdf_path, 
-                save_all=True, 
-                append_images=processed_images[1:],
-                resolution=float(dpi_setting)
-            )
-
-            with open(output_pdf_path, "rb") as f:
-                st.download_button(
-                    label="📥 Download Recolored PDF",
-                    data=f.read(),
-                    file_name=f"recolored_{uploaded_file.name}",
-                    mime="application/pdf"
+                output_pdf_path = "recolored_output.pdf"
+                processed_images[0].save(
+                    output_pdf_path, 
+                    save_all=True, 
+                    append_images=processed_images[1:],
+                    resolution=float(dpi_setting)
                 )
+                with open(output_pdf_path, "rb") as f:
+                    output_pdf_bytes = f.read()
+
+            st.success("Processing Complete!")
+            st.download_button(
+                label="📥 Download Recolored PDF",
+                data=output_pdf_bytes,
+                file_name=f"recolored_{uploaded_file.name}",
+                mime="application/pdf"
+            )
