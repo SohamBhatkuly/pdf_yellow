@@ -52,28 +52,39 @@ uploaded_file = st.file_uploader("Upload your PDF file", type=["pdf"])
 def recolor_vector_page(page):
     """Replaces vector stroke and fill color operators in the PDF content stream safely."""
     r, g, b = FLOAT_LINE_COLOR
-    
-    # Clean and combine content streams into a single clean stream reference
+    rgb_str = f"{r:.3f} {g:.3f} {b:.3f}"
+
     page.clean_contents()
     content_list = page.get_contents()
     if not content_list:
         return
-    
-    # Safely fetch stream bytes using document xref stream method
+
     xref = content_list[0]
     stream_bytes = page.parent.xref_stream(xref)
     if not stream_bytes:
         return
-        
-    text_stream = stream_bytes.decode("latin1", errors="ignore")
-    
-    # Replace RGB/Grayscale stroking and non-stroking color operations
-    text_stream = re.sub(r'[\d\.\-\s]+\s+RG', f'{r:.3f} {g:.3f} {b:.3f} RG', text_stream)
-    text_stream = re.sub(r'[\d\.\-\s]+\s+rg', f'{r:.3f} {g:.3f} {b:.3f} rg', text_stream)
-    text_stream = re.sub(r'[\d\.\-\s]+\s+G', f'{r:.3f} {g:.3f} {b:.3f} RG', text_stream)
-    text_stream = re.sub(r'[\d\.\-\s]+\s+g', f'{r:.3f} {g:.3f} {b:.3f} rg', text_stream)
 
-    # Write the modified stream back into the document stream reference
+    text_stream = stream_bytes.decode("latin1", errors="ignore")
+
+    num = r'[+-]?\d*\.?\d+'
+
+    def op_pattern(op, n_operands):
+        operands = r'\s+'.join([num] * n_operands)
+        # require operands not glued to a preceding alnum, and op not glued to a following letter
+        return re.compile(r'(?<![A-Za-z0-9.])' + operands + r'\s+' + re.escape(op) + r'(?![A-Za-z])')
+
+    replacements = [
+        (op_pattern('RG', 3), f'{rgb_str} RG'),   # stroke RGB
+        (op_pattern('rg', 3), f'{rgb_str} rg'),   # fill RGB
+        (op_pattern('G', 1),  f'{rgb_str} RG'),   # stroke gray
+        (op_pattern('g', 1),  f'{rgb_str} rg'),   # fill gray
+        (op_pattern('K', 4),  f'{rgb_str} RG'),   # stroke CMYK  <-- this was missing
+        (op_pattern('k', 4),  f'{rgb_str} rg'),   # fill CMYK    <-- this was missing
+    ]
+
+    for pattern, replacement in replacements:
+        text_stream = pattern.sub(replacement, text_stream)
+
     page.parent.update_stream(xref, text_stream.encode("latin1"))
 
 if uploaded_file is not None:
