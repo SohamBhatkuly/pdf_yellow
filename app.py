@@ -221,6 +221,18 @@ if uploaded_file is not None:
 
         recolor_vector_page(temp_page, debug=True)
 
+        # Serialize and reopen: guarantees get_pixmap() parses the fresh, edited bytes
+        # rather than any stale in-memory page structure MuPDF may have cached.
+        temp_bytes = temp_doc.write()
+        temp_doc.close()
+        temp_doc = fitz.open(stream=temp_bytes, filetype="pdf")
+        temp_page = temp_doc[0]
+
+        reopened_stream = temp_doc.xref_stream(temp_page.get_contents()[0]).decode("latin1", errors="ignore")
+        r, g, b = FLOAT_LINE_COLOR
+        reopened_count = reopened_stream.count(f'{r:.3f} {g:.3f} {b:.3f} RG')
+        st.sidebar.write(f"Target color occurrences in reopened doc's stream: {reopened_count}")
+
         pix_vec = temp_page.get_pixmap(dpi=150)
         recolored_preview_img = Image.frombytes("RGB", [pix_vec.width, pix_vec.height], pix_vec.samples)
 
