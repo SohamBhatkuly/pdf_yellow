@@ -3,6 +3,7 @@ import numpy as np
 from PIL import Image
 import streamlit as st
 import re
+from collections import Counter
 
 st.set_page_config(page_title="PDF Line Recolorer", layout="wide")
 st.title("🟡 Advanced PDF Line Recolorer")
@@ -49,7 +50,8 @@ else:
 
 uploaded_file = st.file_uploader("Upload your PDF file", type=["pdf"])
 
-def recolor_vector_page(page):
+
+def recolor_vector_page(page, debug=False):
     """Replaces vector stroke and fill color operators in the PDF content stream safely."""
     r, g, b = FLOAT_LINE_COLOR
     rgb_str = f"{r:.3f} {g:.3f} {b:.3f}"
@@ -57,11 +59,15 @@ def recolor_vector_page(page):
     page.clean_contents()
     content_list = page.get_contents()
     if not content_list:
+        if debug:
+            st.sidebar.error("No content streams found on this page.")
         return
 
     xref = content_list[0]
     stream_bytes = page.parent.xref_stream(xref)
     if not stream_bytes:
+        if debug:
+            st.sidebar.error("xref_stream returned empty bytes.")
         return
 
     text_stream = stream_bytes.decode("latin1", errors="ignore")
@@ -78,17 +84,43 @@ def recolor_vector_page(page):
         (op_pattern('rg', 3), f'{rgb_str} rg'),   # fill RGB
         (op_pattern('G', 1),  f'{rgb_str} RG'),   # stroke gray
         (op_pattern('g', 1),  f'{rgb_str} rg'),   # fill gray
-        (op_pattern('K', 4),  f'{rgb_str} RG'),   # stroke CMYK  <-- this was missing
-        (op_pattern('k', 4),  f'{rgb_str} rg'),   # fill CMYK    <-- this was missing
+        (op_pattern('K', 4),  f'{rgb_str} RG'),   # stroke CMYK
+        (op_pattern('k', 4),  f'{rgb_str} rg'),   # fill CMYK
     ]
+
+    counts_before = {}
+    if debug:
+        for pattern, _ in replacements:
+            counts_before[pattern.pattern] = len(pattern.findall(text_stream))
 
     for pattern, replacement in replacements:
         text_stream = pattern.sub(replacement, text_stream)
 
+    if debug:
+        target_occurrences = text_stream.count(f'{rgb_str} RG') + text_stream.count(f'{rgb_str} rg')
+        st.sidebar.subheader("🛠️ Recolor Debug")
+        st.sidebar.write("Matches found before substitution (by operator):")
+        st.sidebar.write({
+            "RG (stroke RGB)": counts_before[replacements[0][0].pattern],
+            "rg (fill RGB)": counts_before[replacements[1][0].pattern],
+            "G (stroke gray)": counts_before[replacements[2][0].pattern],
+            "g (fill gray)": counts_before[replacements[3][0].pattern],
+            "K (stroke CMYK)": counts_before[replacements[4][0].pattern],
+            "k (fill CMYK)": counts_before[replacements[5][0].pattern],
+        })
+        st.sidebar.write(f"Target color string occurrences after substitution: {target_occurrences}")
+
     page.parent.update_stream(xref, text_stream.encode("latin1"))
 
+    if debug:
+        # Re-read the stream from the document to confirm the write actually persisted
+        check_bytes = page.parent.xref_stream(xref)
+        check_text = check_bytes.decode("latin1", errors="ignore")
+        persisted = check_text.count(f'{rgb_str} RG') + check_text.count(f'{rgb_str} rg')
+        st.sidebar.write(f"Target color string occurrences confirmed after write-back: {persisted}")
+
+
 def diagnose_stream(page):
-    from collections import Counter
     page.clean_contents()
     content_list = page.get_contents()
     if not content_list:
@@ -102,17 +134,18 @@ def diagnose_stream(page):
     return Counter(op for op in ops if op in
         ['RG', 'rg', 'G', 'g', 'K', 'k', 'SC', 'SCN', 'sc', 'scn', 'CS', 'cs'])
 
+
 if uploaded_file is not None:
     doc = fitz.open(stream=uploaded_file.read(), filetype="pdf")
     total_pages = len(doc)
-    
+
     st.write(f"📄 **Total Pages in Document:** {total_pages}")
-    
+
     st.subheader("1. Select Pages to Process")
     page_option = st.radio("Page Processing Scope:", ["All Pages", "Specific Pages / Range"])
-    
+
     selected_indices = list(range(total_pages))
-    
+
     if page_option == "Specific Pages / Range":
         page_input = st.text_input(
             "Enter page numbers or ranges (e.g., '1, 3, 5-8'):",
@@ -140,17 +173,12 @@ if uploaded_file is not None:
     col1, col2 = st.columns(2)
 
     preview_page = doc[preview_idx]
-    preview_page = doc[preview_idx]
 
-    # --- ADD THIS ---
     if engine_mode == "Vector (Native PDF Shapes)":
         op_counts = diagnose_stream(preview_page)
         st.sidebar.subheader("🔍 Stream Diagnostics")
         st.sidebar.write(dict(op_counts) if op_counts else "No color operators found")
-    # --- END ADD ---
 
-    pix_orig = preview_page.get_pixmap(dpi=150)
-    ...
     pix_orig = preview_page.get_pixmap(dpi=150)
     orig_img = Image.frombytes("RGB", [pix_orig.width, pix_orig.height], pix_orig.samples)
     col1.image(orig_img, caption=f"Original (Page {preview_page_num})", use_container_width=True)
@@ -159,7 +187,7 @@ if uploaded_file is not None:
         img_np = np.array(orig_img)
         gray_np = np.array(orig_img.convert("L"))
         drawing_mask = gray_np < threshold
-        
+
         preview_np = np.full_like(img_np, BG_COLOR)
         preview_np[drawing_mask] = LINE_COLOR
         recolored_preview_img = Image.fromarray(preview_np)
@@ -167,9 +195,9 @@ if uploaded_file is not None:
         temp_doc = fitz.open()
         temp_doc.insert_pdf(doc, from_page=preview_idx, to_page=preview_idx)
         temp_page = temp_doc[0]
-        
-        recolor_vector_page(temp_page)
-                
+
+        recolor_vector_page(temp_page, debug=True)
+
         pix_vec = temp_page.get_pixmap(dpi=150)
         recolored_preview_img = Image.frombytes("RGB", [pix_vec.width, pix_vec.height], pix_vec.samples)
 
@@ -179,36 +207,36 @@ if uploaded_file is not None:
     st.subheader("3. Export Full Document")
     if st.button("Process & Download PDF"):
         with st.spinner("Processing selected pages..."):
-            
+
             if engine_mode == "Vector (Native PDF Shapes)":
                 output_doc = fitz.open()
                 for idx in selected_indices:
                     output_doc.insert_pdf(doc, from_page=idx, to_page=idx)
                     target_page = output_doc[-1]
-                    recolor_vector_page(target_page)
-                
+                    recolor_vector_page(target_page, debug=False)
+
                 output_pdf_bytes = output_doc.write()
-                
+
             else:
                 processed_images = []
                 for idx in selected_indices:
                     page = doc[idx]
                     pix = page.get_pixmap(dpi=dpi_setting)
                     img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
-                    
+
                     img_np = np.array(img)
                     gray_np = np.array(img.convert("L"))
                     drawing_mask = gray_np < threshold
-                    
+
                     recolored_np = np.full_like(img_np, BG_COLOR)
                     recolored_np[drawing_mask] = LINE_COLOR
-                    
+
                     processed_images.append(Image.fromarray(recolored_np))
 
                 output_pdf_path = "recolored_output.pdf"
                 processed_images[0].save(
-                    output_pdf_path, 
-                    save_all=True, 
+                    output_pdf_path,
+                    save_all=True,
                     append_images=processed_images[1:],
                     resolution=float(dpi_setting)
                 )
@@ -221,4 +249,4 @@ if uploaded_file is not None:
                 data=output_pdf_bytes,
                 file_name=f"recolored_{uploaded_file.name}",
                 mime="application/pdf"
-            )   
+            )
