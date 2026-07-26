@@ -2,6 +2,7 @@ import fitz  # PyMuPDF
 import numpy as np
 from PIL import Image
 import streamlit as st
+import re
 
 st.set_page_config(page_title="PDF Line Recolorer", layout="wide")
 st.title("🟡 Advanced PDF Line Recolorer")
@@ -9,7 +10,6 @@ st.title("🟡 Advanced PDF Line Recolorer")
 # --- SIDEBAR CONTROLS ---
 st.sidebar.header("Processing Controls")
 
-# Engine Mode Selection
 engine_mode = st.sidebar.radio(
     "Recoloring Engine",
     options=["Raster (Image-Based)", "Vector (Native PDF Shapes)"],
@@ -23,7 +23,6 @@ if engine_mode == "Raster (Image-Based)":
     threshold = st.sidebar.slider("Line Sensitivity", min_value=150, max_value=255, value=240, help="Lower = thinner lines, Higher = thicker/fainter lines")
     dpi_setting = st.sidebar.select_slider("Export DPI", options=[150, 300, 450], value=300)
 
-# Helper functions for hex conversion
 def hex_to_rgb(hex_str):
     h = hex_str.lstrip('#')
     return np.array([int(h[i:i+2], 16) for i in (0, 2, 4)], dtype=np.uint8)
@@ -40,8 +39,7 @@ FLOAT_LINE_COLOR = hex_to_float_rgb(target_hex)
 if engine_mode == "Vector (Native PDF Shapes)":
     st.info(
         "💡 **Vector Mode Active:** Ideal for digital CAD exports (AutoCAD, Revit) and native PDF vector files. "
-        "It preserves 100% vector sharpness, keeps text searchable, and results in tiny file sizes. "
-        "*Note: It will not recolor scanned paper documents.*"
+        "It modifies native stroke/fill operators, preserves vector sharpness, and keeps text searchable."
     )
 else:
     st.info(
@@ -51,17 +49,60 @@ else:
 
 uploaded_file = st.file_uploader("Upload your PDF file", type=["pdf"])
 
+def recolor_vector_page(page):
+    """Replaces vector stroke and fill color operators in the PDF content stream."""
+    r, g, b = FLOAT_LINE_COLOR
+    # Common PDF color operators: 
+    # RG / rg (Stroking/Non-stroking RGB), K / k (CMYK), G / g (Gray)
+    # We can inject/replace color operands preceding RG/rg operators or rewrite content tokens.
+    
+    # Extract page content stream text/instructions
+    content_bytes = page.get_contents()
+    if not content_bytes:
+        return
+    
+    # Handle multiple content streams if present
+    if isinstance(content_bytes, bytes):
+        streams = [content_bytes]
+    else:
+        streams = [page.read_contents(xref) for xref in content_bytes]
+    
+    new_streams = []
+    for stream in streams:
+        if not stream:
+            new_streams.append(stream)
+            continue
+        text_stream = stream.decode("latin1", errors="ignore")
+        
+        # Replace RGB stroking and non-stroking color commands (e.g., "0.5 0.5 0.5 RG" -> "1 0.95 0 RG")
+        # Pattern looks for numbers followed by RG or rg
+        text_stream = re.sub(r'[\d\.\-\s]+\s+RG', f'{r:.3f} {g:.3f} {b:.3f} RG', text_stream)
+        text_stream = re.sub(r'[\d\.\-\s]+\s+rg', f'{r:.3f} {g:.3f} {b:.3f} rg', text_stream)
+        
+        # Also handle grayscale (G, g) and convert to target RGB approximation or pure color
+        text_stream = re.sub(r'[\d\.\-\s]+\s+G', f'{r:.3f} {g:.3f} {b:.3f} RG', text_stream)
+        text_stream = re.sub(r'[\d\.\-\s]+\s+g', f'{r:.3f} {g:.3f} {b:.3f} rg', text_stream)
+
+        new_streams.append(text_stream.encode("latin1"))
+        
+    # Update page contents with modified streams
+    if len(new_streams) == 1:
+        page.clean_contents()
+        page.update_contents(new_streams[0])
+    else:
+        for xref, st_bytes in zip(content_bytes, new_streams):
+            page.update_contents(xref, st_bytes)
+
 if uploaded_file is not None:
     doc = fitz.open(stream=uploaded_file.read(), filetype="pdf")
     total_pages = len(doc)
     
     st.write(f"📄 **Total Pages in Document:** {total_pages}")
     
-    # --- PAGE SELECTION FEATURE ---
     st.subheader("1. Select Pages to Process")
     page_option = st.radio("Page Processing Scope:", ["All Pages", "Specific Pages / Range"])
     
-    selected_indices = list(range(total_pages))  # Default: all pages
+    selected_indices = list(range(total_pages))
     
     if page_option == "Specific Pages / Range":
         page_input = st.text_input(
@@ -80,7 +121,7 @@ if uploaded_file is not None:
             selected_indices = sorted([i for i in parsed_indices if 0 <= i < total_pages])
             st.success(f"Selected {len(selected_indices)} page(s): {[idx + 1 for idx in selected_indices]}")
         except Exception:
-            st.error("Invalid page format. Please enter numbers like '1, 3-5'. Processing all pages by default.")
+            st.error("Invalid page format. Processing all pages by default.")
 
     # --- LIVE PREVIEW FEATURE ---
     st.subheader("2. Live Preview")
@@ -89,13 +130,11 @@ if uploaded_file is not None:
 
     col1, col2 = st.columns(2)
 
-    # Generate Original Preview Image
     preview_page = doc[preview_idx]
     pix_orig = preview_page.get_pixmap(dpi=150)
     orig_img = Image.frombytes("RGB", [pix_orig.width, pix_orig.height], pix_orig.samples)
     col1.image(orig_img, caption=f"Original (Page {preview_page_num})", use_container_width=True)
 
-    # Generate Modified Preview Image depending on Engine
     if engine_mode == "Raster (Image-Based)":
         img_np = np.array(orig_img)
         gray_np = np.array(orig_img.convert("L"))
@@ -105,16 +144,11 @@ if uploaded_file is not None:
         preview_np[drawing_mask] = LINE_COLOR
         recolored_preview_img = Image.fromarray(preview_np)
     else:
-        # Vector mode preview: Create a temporary doc for single page preview
         temp_doc = fitz.open()
         temp_doc.insert_pdf(doc, from_page=preview_idx, to_page=preview_idx)
         temp_page = temp_doc[0]
         
-        for shape in temp_page.get_drawings():
-            if "color" in shape and shape["color"] is not None:
-                shape["color"] = FLOAT_LINE_COLOR
-            if "fill" in shape and shape["fill"] is not None:
-                shape["fill"] = FLOAT_LINE_COLOR
+        recolor_vector_page(temp_page)
                 
         pix_vec = temp_page.get_pixmap(dpi=150)
         recolored_preview_img = Image.frombytes("RGB", [pix_vec.width, pix_vec.height], pix_vec.samples)
@@ -126,22 +160,15 @@ if uploaded_file is not None:
     if st.button("Process & Download PDF"):
         with st.spinner("Processing selected pages..."):
             
-            # ENGINE 1: VECTOR PROCESSING
             if engine_mode == "Vector (Native PDF Shapes)":
                 output_doc = fitz.open()
                 for idx in selected_indices:
-                    page = doc[idx]
-                    shape_list = page.get_drawings()
-                    for shape in shape_list:
-                        if "color" in shape and shape["color"] is not None:
-                            shape["color"] = FLOAT_LINE_COLOR
-                        if "fill" in shape and shape["fill"] is not None:
-                            shape["fill"] = FLOAT_LINE_COLOR
                     output_doc.insert_pdf(doc, from_page=idx, to_page=idx)
+                    target_page = output_doc[-1]
+                    recolor_vector_page(target_page)
                 
                 output_pdf_bytes = output_doc.write()
                 
-            # ENGINE 2: RASTER PROCESSING
             else:
                 processed_images = []
                 for idx in selected_indices:
