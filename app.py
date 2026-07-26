@@ -9,7 +9,7 @@ st.title("🟡 Advanced PDF Line Recolorer")
 # --- SIDEBAR CONTROLS ---
 st.sidebar.header("Processing Controls")
 
-# Processing Mode Selection
+# Engine Mode Selection
 engine_mode = st.sidebar.radio(
     "Recoloring Engine",
     options=["Raster (Image-Based)", "Vector (Native PDF Shapes)"],
@@ -58,7 +58,7 @@ if uploaded_file is not None:
     st.write(f"📄 **Total Pages in Document:** {total_pages}")
     
     # --- PAGE SELECTION FEATURE ---
-    st.subheader("Select Pages to Process")
+    st.subheader("1. Select Pages to Process")
     page_option = st.radio("Page Processing Scope:", ["All Pages", "Specific Pages / Range"])
     
     selected_indices = list(range(total_pages))  # Default: all pages
@@ -77,37 +77,71 @@ if uploaded_file is not None:
                     parsed_indices.update(range(int(start) - 1, int(end)))
                 else:
                     parsed_indices.add(int(part) - 1)
-            # Filter valid page ranges
             selected_indices = sorted([i for i in parsed_indices if 0 <= i < total_pages])
             st.success(f"Selected {len(selected_indices)} page(s): {[idx + 1 for idx in selected_indices]}")
         except Exception:
             st.error("Invalid page format. Please enter numbers like '1, 3-5'. Processing all pages by default.")
 
+    # --- LIVE PREVIEW FEATURE ---
+    st.subheader("2. Live Preview")
+    preview_page_num = st.number_input("Select page to preview:", min_value=1, max_value=total_pages, value=1, step=1)
+    preview_idx = preview_page_num - 1
+
+    col1, col2 = st.columns(2)
+
+    # Generate Original Preview Image
+    preview_page = doc[preview_idx]
+    pix_orig = preview_page.get_pixmap(dpi=150)
+    orig_img = Image.frombytes("RGB", [pix_orig.width, pix_orig.height], pix_orig.samples)
+    col1.image(orig_img, caption=f"Original (Page {preview_page_num})", use_container_width=True)
+
+    # Generate Modified Preview Image depending on Engine
+    if engine_mode == "Raster (Image-Based)":
+        img_np = np.array(orig_img)
+        gray_np = np.array(orig_img.convert("L"))
+        drawing_mask = gray_np < threshold
+        
+        preview_np = np.full_like(img_np, BG_COLOR)
+        preview_np[drawing_mask] = LINE_COLOR
+        recolored_preview_img = Image.fromarray(preview_np)
+    else:
+        # Vector mode preview: Create a temporary doc for single page preview
+        temp_doc = fitz.open()
+        temp_doc.insert_pdf(doc, from_page=preview_idx, to_page=preview_idx)
+        temp_page = temp_doc[0]
+        
+        for shape in temp_page.get_drawings():
+            if "color" in shape and shape["color"] is not None:
+                shape["color"] = FLOAT_LINE_COLOR
+            if "fill" in shape and shape["fill"] is not None:
+                shape["fill"] = FLOAT_LINE_COLOR
+                
+        pix_vec = temp_page.get_pixmap(dpi=150)
+        recolored_preview_img = Image.frombytes("RGB", [pix_vec.width, pix_vec.height], pix_vec.samples)
+
+    col2.image(recolored_preview_img, caption=f"Recolored Preview ({engine_mode.split()[0]} Mode)", use_container_width=True)
+
     # --- PROCESS & DOWNLOAD ---
+    st.subheader("3. Export Full Document")
     if st.button("Process & Download PDF"):
         with st.spinner("Processing selected pages..."):
             
-            # --- ENGINE 1: VECTOR PROCESSING ---
+            # ENGINE 1: VECTOR PROCESSING
             if engine_mode == "Vector (Native PDF Shapes)":
                 output_doc = fitz.open()
-                
                 for idx in selected_indices:
                     page = doc[idx]
-                    
-                    # Create a drawing layer update
                     shape_list = page.get_drawings()
                     for shape in shape_list:
-                        # Override line stroke and fill colors to target RGB
                         if "color" in shape and shape["color"] is not None:
                             shape["color"] = FLOAT_LINE_COLOR
                         if "fill" in shape and shape["fill"] is not None:
                             shape["fill"] = FLOAT_LINE_COLOR
-                    
                     output_doc.insert_pdf(doc, from_page=idx, to_page=idx)
                 
                 output_pdf_bytes = output_doc.write()
                 
-            # --- ENGINE 2: RASTER PROCESSING ---
+            # ENGINE 2: RASTER PROCESSING
             else:
                 processed_images = []
                 for idx in selected_indices:
