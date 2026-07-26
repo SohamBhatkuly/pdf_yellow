@@ -50,48 +50,31 @@ else:
 uploaded_file = st.file_uploader("Upload your PDF file", type=["pdf"])
 
 def recolor_vector_page(page):
-    """Replaces vector stroke and fill color operators in the PDF content stream."""
+    """Replaces vector stroke and fill color operators in the PDF content stream safely."""
     r, g, b = FLOAT_LINE_COLOR
-    # Common PDF color operators: 
-    # RG / rg (Stroking/Non-stroking RGB), K / k (CMYK), G / g (Gray)
-    # We can inject/replace color operands preceding RG/rg operators or rewrite content tokens.
     
-    # Extract page content stream text/instructions
-    content_bytes = page.get_contents()
-    if not content_bytes:
+    # Clean and combine content streams into a single clean stream reference
+    page.clean_contents()
+    content_list = page.get_contents()
+    if not content_list:
         return
     
-    # Handle multiple content streams if present
-    if isinstance(content_bytes, bytes):
-        streams = [content_bytes]
-    else:
-        streams = [page.read_contents(xref) for xref in content_bytes]
+    # Safely fetch stream bytes using document xref stream method
+    xref = content_list[0]
+    stream_bytes = page.parent.xref_stream(xref)
+    if not stream_bytes:
+        return
+        
+    text_stream = stream_bytes.decode("latin1", errors="ignore")
     
-    new_streams = []
-    for stream in streams:
-        if not stream:
-            new_streams.append(stream)
-            continue
-        text_stream = stream.decode("latin1", errors="ignore")
-        
-        # Replace RGB stroking and non-stroking color commands (e.g., "0.5 0.5 0.5 RG" -> "1 0.95 0 RG")
-        # Pattern looks for numbers followed by RG or rg
-        text_stream = re.sub(r'[\d\.\-\s]+\s+RG', f'{r:.3f} {g:.3f} {b:.3f} RG', text_stream)
-        text_stream = re.sub(r'[\d\.\-\s]+\s+rg', f'{r:.3f} {g:.3f} {b:.3f} rg', text_stream)
-        
-        # Also handle grayscale (G, g) and convert to target RGB approximation or pure color
-        text_stream = re.sub(r'[\d\.\-\s]+\s+G', f'{r:.3f} {g:.3f} {b:.3f} RG', text_stream)
-        text_stream = re.sub(r'[\d\.\-\s]+\s+g', f'{r:.3f} {g:.3f} {b:.3f} rg', text_stream)
+    # Replace RGB/Grayscale stroking and non-stroking color operations
+    text_stream = re.sub(r'[\d\.\-\s]+\s+RG', f'{r:.3f} {g:.3f} {b:.3f} RG', text_stream)
+    text_stream = re.sub(r'[\d\.\-\s]+\s+rg', f'{r:.3f} {g:.3f} {b:.3f} rg', text_stream)
+    text_stream = re.sub(r'[\d\.\-\s]+\s+G', f'{r:.3f} {g:.3f} {b:.3f} RG', text_stream)
+    text_stream = re.sub(r'[\d\.\-\s]+\s+g', f'{r:.3f} {g:.3f} {b:.3f} rg', text_stream)
 
-        new_streams.append(text_stream.encode("latin1"))
-        
-    # Update page contents with modified streams
-    if len(new_streams) == 1:
-        page.clean_contents()
-        page.update_contents(new_streams[0])
-    else:
-        for xref, st_bytes in zip(content_bytes, new_streams):
-            page.update_contents(xref, st_bytes)
+    # Write the modified stream back into the document stream reference
+    page.parent.update_stream(xref, text_stream.encode("latin1"))
 
 if uploaded_file is not None:
     doc = fitz.open(stream=uploaded_file.read(), filetype="pdf")
