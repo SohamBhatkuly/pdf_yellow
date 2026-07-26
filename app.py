@@ -184,4 +184,4 @@ if uploaded_file is not None:
                 data=output_pdf_bytes,
                 file_name=f"recolored_{uploaded_file.name}",
                 mime="application/pdf"
-            )
+            )   
