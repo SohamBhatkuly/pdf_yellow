@@ -2,3 +2,4 @@ PyMuPDF
 Pillow
 numpy
 streamlit
+opencv-python-headless
